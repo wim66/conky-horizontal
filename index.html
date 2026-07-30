@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>conky-horizontal — a liquid-glass system bar for Conky</title>
+<meta name="description" content="A single-file Lua/Cairo horizontal system monitor bar for Conky, with a liquid-glass visual style.">
+<style>
+  :root {
+    --bg-deep: #05060d;
+    --glass-tint: #08081a;
+    --text: #e9e9f1;
+    --muted: #8b8fa3;
+    --orange: #e7660b;
+    --yellow: #dce142;
+    --green: #42e147;
+    --blue: #00a2ff;
+    --purple: #aa88ff;
+    --mono: ui-monospace, "DejaVu Sans Mono", "SF Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg-deep);
+    color: var(--text);
+    font-family: var(--sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  body {
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* ---------- ambient wallpaper glow, like the desktop this bar floats over ---------- */
+  .glow {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    background:
+      radial-gradient(600px 400px at 12% 8%, rgba(231, 102, 11, 0.16), transparent 60%),
+      radial-gradient(700px 480px at 88% 18%, rgba(0, 162, 255, 0.14), transparent 60%),
+      radial-gradient(650px 500px at 50% 95%, rgba(66, 225, 71, 0.10), transparent 60%);
+  }
+
+  main {
+    position: relative;
+    z-index: 1;
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 48px 24px 80px;
+  }
+
+  /* ---------- signature: the widget's own liquid-glass panel, in CSS ---------- */
+  .glass {
+    position: relative;
+    background-color: rgba(8, 8, 26, 0.45);
+    background-image: linear-gradient(180deg,
+      rgba(255,255,255,0.07) 0%,
+      rgba(170,187,255,0.025) 15%,
+      rgba(170,187,255,0.025) 85%,
+      rgba(255,255,255,0.06) 100%);
+    -webkit-backdrop-filter: blur(20px);
+    backdrop-filter: blur(20px);
+    border: 1px solid rgba(255,255,255,0.10);
+    border-radius: 16px;
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,0.14),
+      0 18px 50px rgba(0,0,0,0.45);
+    overflow: hidden;
+  }
+  .glass::before {
+    content: "";
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 38%;
+    background: linear-gradient(180deg, rgba(255,255,255,0.22), rgba(255,255,255,0));
+    pointer-events: none;
+  }
+
+  /* ---------- header ---------- */
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
+    margin-bottom: 40px;
+    flex-wrap: wrap;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+  .brand img {
+    height: 40px;
+    width: auto;
+    display: block;
+  }
+  .brand h1 {
+    font-family: var(--mono);
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+    margin: 0;
+  }
+  .brand p {
+    margin: 2px 0 0;
+    font-size: 13px;
+    color: var(--muted);
+  }
+  .gh-link {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--text);
+    text-decoration: none;
+    border: 1px solid rgba(255,255,255,0.18);
+    padding: 9px 16px;
+    border-radius: 999px;
+    background: rgba(255,255,255,0.04);
+    transition: border-color 0.2s ease, background 0.2s ease;
+    white-space: nowrap;
+  }
+  .gh-link:hover {
+    border-color: rgba(255,255,255,0.4);
+    background: rgba(255,255,255,0.08);
+  }
+
+  /* ---------- hero ---------- */
+  .hero {
+    padding: 20px;
+    margin-bottom: 18px;
+  }
+  .hero img {
+    display: block;
+    width: 100%;
+    height: auto;
+    border-radius: 10px;
+  }
+  .hero-caption {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin: 22px 8px 0;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .hero-caption h2 {
+    font-family: var(--mono);
+    font-size: 15px;
+    font-weight: 600;
+    margin: 0;
+    color: var(--text);
+  }
+  .hero-caption span {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+  }
+
+  .lede {
+    max-width: 62ch;
+    margin: 28px 8px 48px;
+    font-size: 16px;
+    line-height: 1.65;
+    color: #cfd1de;
+  }
+  .lede strong { color: var(--text); }
+
+  /* ---------- feature panels: one per panel in the real bar, same order ---------- */
+  .panels {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 14px;
+    margin-bottom: 56px;
+  }
+  .panel {
+    padding: 18px 16px 20px;
+  }
+  .panel .bar {
+    height: 3px;
+    border-radius: 3px;
+    margin-bottom: 14px;
+    width: 28px;
+  }
+  .panel h3 {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    margin: 0 0 10px;
+    color: var(--text);
+  }
+  .panel p {
+    font-size: 13px;
+    line-height: 1.55;
+    color: var(--muted);
+    margin: 0;
+  }
+  .panel p code {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: #c7c9d6;
+    background: rgba(255,255,255,0.06);
+    padding: 1px 5px;
+    border-radius: 4px;
+  }
+
+  /* ---------- install ---------- */
+  .install {
+    margin-bottom: 56px;
+  }
+  .install h2 {
+    font-family: var(--mono);
+    font-size: 15px;
+    margin: 0 0 16px;
+    padding: 0 8px;
+  }
+  .terminal {
+    padding: 20px 22px;
+    font-family: var(--mono);
+    font-size: 13.5px;
+    line-height: 1.9;
+    color: #d7e6ff;
+    overflow-x: auto;
+  }
+  .terminal .prompt { color: var(--green); }
+  .terminal .comment { color: var(--muted); }
+
+  /* ---------- config callouts ---------- */
+  .notes {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 14px;
+    margin-bottom: 24px;
+  }
+  .note {
+    padding: 18px 18px 20px;
+  }
+  .note h4 {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    margin: 0 0 8px;
+    color: var(--yellow);
+  }
+  .note p {
+    font-size: 13px;
+    line-height: 1.55;
+    color: var(--muted);
+    margin: 0;
+  }
+
+  /* ---------- footer ---------- */
+  footer {
+    margin-top: 64px;
+    padding-top: 24px;
+    border-top: 1px solid rgba(255,255,255,0.08);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+    font-size: 13px;
+    color: var(--muted);
+  }
+  footer a { color: var(--text); }
+
+  @media (max-width: 900px) {
+    .panels { grid-template-columns: repeat(2, 1fr); }
+    .notes { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 560px) {
+    .panels { grid-template-columns: 1fr; }
+    .hero { padding: 12px; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; }
+  }
+</style>
+</head>
+<body>
+
+<div class="glow"></div>
+
+<main>
+
+  <header>
+    <div class="brand">
+      <img src="logo.png" alt="conky-horizontal logo">
+      <div>
+        <h1>conky-horizontal</h1>
+        <p>A liquid-glass system bar for Conky</p>
+      </div>
+    </div>
+    <a class="gh-link" href="https://github.com/wim66/conky-horizontal">View on GitHub →</a>
+  </header>
+
+  <section class="hero glass">
+    <img src="preview.png" alt="conky-horizontal widget preview — five glass panels showing time, updates, CPU, RAM, storage, and network">
+  </section>
+  <div class="hero-caption">
+    <h2>Five panels, one bar</h2>
+    <span>widget.lua · single file · Lua + Cairo</span>
+  </div>
+
+  <p class="lede">
+    A single-file, all-Lua/Cairo horizontal system monitor for <a href="https://github.com/brndnmtthws/conky" style="color:inherit">Conky</a>, styled after real liquid glass —
+    layered gradients, a specular highlight, and a soft frosted tint over your wallpaper. <strong>Date &amp; time, updates,
+    CPU, RAM, storage and network</strong>, all in one wide strip across the top of the screen.
+  </p>
+
+  <div class="panels">
+    <div class="panel glass">
+      <div class="bar" style="background: var(--yellow);"></div>
+      <h3>Time &amp; Updates</h3>
+      <p>Clock, date, hostname, and uptime. Pacman (<code>checkupdates</code>) plus optional AUR and Flatpak counts, each stacked on its own line.</p>
+    </div>
+    <div class="panel glass">
+      <div class="bar" style="background: linear-gradient(90deg, var(--green), var(--yellow), var(--orange));"></div>
+      <h3>CPU</h3>
+      <p>Live load graph that shifts green → yellow → red with load. Frequency and temperature straight from <code>/sys/class/hwmon</code> — no <code>lm_sensors</code> needed. Top 5 processes.</p>
+    </div>
+    <div class="panel glass">
+      <div class="bar" style="background: var(--green);"></div>
+      <h3>RAM</h3>
+      <p>Usage bar with used/total, plus the top 5 processes by memory.</p>
+    </div>
+    <div class="panel glass">
+      <div class="bar" style="background: var(--purple);"></div>
+      <h3>Storage</h3>
+      <p>Usage bars for <code>/</code> and <code>/home</code>, with used/size shown alongside each.</p>
+    </div>
+    <div class="panel glass">
+      <div class="bar" style="background: linear-gradient(90deg, var(--blue), var(--orange));"></div>
+      <h3>Network</h3>
+      <p>Live up/down speed and session totals, with side-by-side auto-scaling graphs — each capped at its own configurable MB/s ceiling.</p>
+    </div>
+  </div>
+
+  <div class="install">
+    <h2>Quick install</h2>
+    <div class="terminal glass">
+<span class="comment"># clone into your Conky config directory</span><br>
+<span class="prompt">$</span> git clone https://github.com/wim66/conky-horizontal.git ~/.conky/conky-horizontal<br>
+<span class="prompt">$</span> cd ~/.conky/conky-horizontal<br>
+<br>
+<span class="comment"># edit CFG in widget.lua — at minimum, set network_iface</span><br>
+<span class="prompt">$</span> conky -c conky.conf
+    </div>
+  </div>
+
+  <div class="notes">
+    <div class="note glass">
+      <h4>Per-graph settings</h4>
+      <p>Height, color, fill/line opacity, and history length are configurable independently for the CPU, download, and upload graphs.</p>
+    </div>
+    <div class="note glass">
+      <h4>Optional logo</h4>
+      <p>Drop in a <code>logo.png</code>, set its <code>x</code>/<code>y</code> and a <code>height</code> — width follows the image's own aspect ratio automatically.</p>
+    </div>
+    <div class="note glass">
+      <h4>Two files to sync</h4>
+      <p><code>conky.conf</code> handles the window; <code>widget.lua</code> handles everything else — layout, drawing, data, caching.</p>
+    </div>
+  </div>
+
+  <footer>
+    <span>By <a href="https://github.com/wim66">@wim66</a>, built with <a href="https://claude.ai">Claude</a>.</span>
+    <span><a href="https://github.com/wim66/conky-horizontal">github.com/wim66/conky-horizontal</a></span>
+  </footer>
+
+</main>
+
+</body>
+</html>
