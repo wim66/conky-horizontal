@@ -4,6 +4,8 @@ A single-file, all-Lua/Cairo horizontal system monitor bar for [Conky](https://g
 
 ![screenshot](preview.png)
 
+![screenshot](preview2.png)
+
 ## Features
 
 - **Date & time** — clock, date, hostname, uptime
