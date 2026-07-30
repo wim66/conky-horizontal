@@ -4,7 +4,7 @@
 
 pcall(require, "cairo")
 
--- Portable drawing-surface helper (Wayland + X11 fallback)[cite: 4, 7]
+-- Portable drawing-surface helper (Wayland + X11 fallback)
 local has_cairo_xlib, cairo_xlib = pcall(require, "cairo_xlib")
 if not has_cairo_xlib then
     cairo_xlib = setmetatable({}, {
@@ -48,7 +48,7 @@ local COLOR_BAR_BG = 0x333344
 local COLOR_DANGER = 0xFF3B30
 
 local CFG = {
-    network_iface = "enp0s31f6", -- Pas aan naar jouw netwerkinterface[cite: 7]
+    network_iface = "auto", -- "auto" for automatic detection, or specify an interface explicitly (e.g. "eth0")
     aur_helper = "yay",   -- "yay", "paru", or "none" -- ignored entirely on non-pacman systems
     show_flatpak = true,  -- true/false: include Flatpak update count
 
@@ -78,10 +78,10 @@ local CFG = {
 
     colors = {
         text     = COLOR_TEXT,
-        accent1  = COLOR_ORANGE, -- Oranje
-        accent2  = COLOR_YELLOW, -- Geel
-        accent3  = COLOR_GREEN,  -- Groen
-        accent4  = COLOR_BLUE,   -- Blauw
+        accent1  = COLOR_ORANGE, -- Orange
+        accent2  = COLOR_YELLOW, -- Yellow
+        accent3  = COLOR_GREEN,  -- Green
+        accent4  = COLOR_BLUE,   -- Blue
         bar_bg   = COLOR_BAR_BG,
         danger   = COLOR_DANGER, -- used by the CPU graph above 90% load
     },
@@ -206,11 +206,56 @@ local function num(s)
     return tonumber((tostring(s):gsub(",", "."))) or 0
 end
 
+-- Detects OS PRETTY_NAME dynamically from /etc/os-release
+local function get_os_name()
+    return cached("os_name", 86400, function()
+        local f = io.open("/etc/os-release", "r")
+        if f then
+            for line in f:lines() do
+                local name = line:match('^PRETTY_NAME="?([^"]+)"?')
+                if name then
+                    f:close()
+                    return name
+                end
+            end
+            f:close()
+        end
+        return conky_parse("${sysname}")
+    end) or "Linux"
+end
+
+-- Detects the active network interface automatically
+local function detect_default_interface()
+    return cached("auto_net_iface", 60, function()
+        local dirs = shell("ls /sys/class/net/ 2>/dev/null") or ""
+        for iface in dirs:gmatch("[^\r\n]+") do
+            if iface ~= "lo" and not iface:find("^virbr") and not iface:find("^docker") and not iface:find("^veth") then
+                local operstate_file = io.open("/sys/class/net/" .. iface .. "/operstate", "r")
+                if operstate_file then
+                    local state = operstate_file:read("*l") or ""
+                    operstate_file:close()
+                    if state == "up" or state == "unknown" then
+                        return iface
+                    end
+                end
+            end
+        end
+        for iface in dirs:gmatch("[^\r\n]+") do
+            if iface ~= "lo" then return iface end
+        end
+        return "eth0"
+    end) or "eth0"
+end
+
+local function get_network_interface()
+    if not CFG.network_iface or CFG.network_iface == "" or CFG.network_iface == "auto" then
+        return detect_default_interface()
+    end
+    return CFG.network_iface
+end
+
 -- ==================== Logo Overlay ====================
 
--- Loads CFG.logo.path once (not on a timer -- a static image never changes),
--- caching the surface plus its native pixel size so draw_logo() can scale
--- purely from the configured height without re-reading the file every tick.
 local function get_logo_surface()
     if W.logo_surface then return W.logo_surface end
     if W.logo_load_failed then return nil end
@@ -218,15 +263,13 @@ local function get_logo_surface()
     local ok, surface = pcall(cairo_image_surface_create_from_png, CFG.logo.path)
     if not ok or not surface then
         W.logo_load_failed = true
-        io.stderr:write("widget.lua: kon logo niet laden via cairo_image_surface_create_from_png: "
+        io.stderr:write("widget.lua: could not load logo via cairo_image_surface_create_from_png: "
             .. tostring(CFG.logo.path) .. "\n")
         return nil
     end
-    -- Some cairo bindings still return a surface object for a missing/bad
-    -- file, but with an error status set -- catch that case too.
     if cairo_surface_status and cairo_surface_status(surface) ~= 0 then
         W.logo_load_failed = true
-        io.stderr:write("widget.lua: logo bestand niet gevonden of ongeldig: " .. tostring(CFG.logo.path) .. "\n")
+        io.stderr:write("widget.lua: logo file not found or invalid: " .. tostring(CFG.logo.path) .. "\n")
         return nil
     end
 
@@ -236,8 +279,6 @@ local function get_logo_surface()
     return surface
 end
 
--- Draws the logo at CFG.logo.x/y, scaled uniformly so CFG.logo.height is
--- respected and the width follows the PNG's own aspect ratio automatically.
 local function draw_logo(cr)
     if not CFG.logo or not CFG.logo.path or CFG.logo.path == "" then return end
     local surface = get_logo_surface()
@@ -255,22 +296,18 @@ end
 
 -- ==================== Cached Data Sources ====================
 
--- Detect the system's package manager once (cached, doesn't change at
--- runtime). More robust than checking for a single hardcoded binary path
--- like apt-check, which isn't guaranteed to be installed on every Debian/
--- Ubuntu/Mint system.
 local function get_pkg_manager()
     return cached("pkg_manager", 86400, function()
         local p = shell("command -v pacman 2>/dev/null")
         if p and p ~= "" then return "pacman" end
+        local d = shell("command -v dnf 2>/dev/null")
+        if d and d ~= "" then return "dnf" end
         local a = shell("command -v apt 2>/dev/null")
         if a and a ~= "" then return "apt" end
         return "none"
     end) or "none"
 end
 
--- AUR only makes sense on an Arch/pacman system -- skip it entirely
--- elsewhere instead of silently printing "0 AUR updates" on Mint/Ubuntu.
 local function get_aur_updates()
     if get_pkg_manager() ~= "pacman" then return nil end
     if CFG.aur_helper == "yay" then
@@ -278,14 +315,9 @@ local function get_aur_updates()
     elseif CFG.aur_helper == "paru" then
         return tonumber(shell("paru -Qua 2>/dev/null | wc -l")) or 0
     end
-    return nil -- "none" or unrecognized helper: skip AUR check entirely
+    return nil
 end
 
--- Flatpak is independent of the OS package manager, so it's checked
--- separately from get_pkg_manager() below -- gated by CFG.show_flatpak and
--- only run if the `flatpak` binary is actually present. The appstream
--- refresh avoids "ghost" updates for packages already updated (a known
--- flatpak quirk, see flatpak/flatpak#3748).
 local function get_flatpak_updates()
     local has_flatpak = cached("has_flatpak", 86400, function()
         local p = shell("command -v flatpak 2>/dev/null")
@@ -299,9 +331,6 @@ local function get_flatpak_updates()
     end)
 end
 
--- Returns a table of separate "Label: N" lines: the OS package manager's
--- update count (pacman or apt), optionally AUR, optionally Flatpak -- so
--- callers can stack them instead of joining on one line.
 local function get_updates()
     return cached("pacman_aur_updates", 1800, function()
         local mgr = get_pkg_manager()
@@ -310,16 +339,10 @@ local function get_updates()
         if mgr == "pacman" then
             local n = tonumber(shell("checkupdates 2>/dev/null | wc -l")) or 0
             table.insert(lines, string.format("Pacman  Updates: %d", n))
+        elseif mgr == "dnf" then
+            local n = tonumber(shell("dnf check-update -q 2>/dev/null | grep -v '^$' | wc -l")) or 0
+            table.insert(lines, string.format("DNF     Updates: %d", n))
         elseif mgr == "apt" then
-            -- Reads the local package index as-is -- unlike pacman's
-            -- checkupdates, apt has no unprivileged way to refresh it (that
-            -- needs root). Relies on apt-daily.timer/unattended-upgrades,
-            -- which refreshes the index roughly daily on most Debian/
-            -- Ubuntu/Mint installs, so this can lag by up to ~a day.
-            -- Match on content ("/" appears in every real "pkg/repo version
-            -- arch [upgradable from: ...]" line) rather than assuming a
-            -- fixed header-line position -- apt's "Listing..." status goes
-            -- to stderr on some versions, stdout on others.
             local n = tonumber(shell("apt list --upgradable 2>/dev/null | grep -c '/'")) or 0
             table.insert(lines, string.format("Apt     Updates: %d", n))
         else
@@ -392,7 +415,6 @@ local function draw_rounded_rect_path(cr, x, y, w, h, r)
     cairo_close_path(cr)
 end
 
--- Liquid-glass box rendering[cite: 2, 7]
 local function draw_glass_box(cr, x, y, w, h)
     local r = CFG.corner_radius
 
@@ -455,12 +477,10 @@ end
 
 local function draw_progress_bar(cr, x, y, w, h, pct, fill_color)
     local r = h / 2
-    -- Background
     cairo_set_source_rgba(cr, hex_to_rgba(CFG.colors.bar_bg, 0.6))
     draw_rounded_rect_path(cr, x, y, w, h, r)
     cairo_fill(cr)
 
-    -- Fill
     local fill_w = math.max(r * 2, (w * math.min(100, math.max(0, pct))) / 100)
     cairo_set_source_rgba(cr, hex_to_rgba(fill_color, 0.9))
     draw_rounded_rect_path(cr, x, y, fill_w, h, r)
@@ -469,11 +489,8 @@ end
 
 -- ==================== History / Area Graphs ====================
 
-local DEFAULT_HISTORY_LEN = 40 -- fallback if a graph config has no `samples`
+local DEFAULT_HISTORY_LEN = 40
 
--- Appends value to the named rolling history buffer (capped at max_len)
--- and returns the buffer, so history survives across ticks without any
--- extra global state to manage per-widget.
 local function push_history(key, value, max_len)
     max_len = max_len or DEFAULT_HISTORY_LEN
     W.history = W.history or {}
@@ -489,7 +506,6 @@ local function push_history(key, value, max_len)
     return h
 end
 
--- Returns the highest value currently in a history buffer (0 if empty).
 local function history_peak(history)
     local m = 0
     for _, v in ipairs(history) do
@@ -498,13 +514,6 @@ local function history_peak(history)
     return m
 end
 
--- Area+line graph from a rolling history buffer. Fill is a bottom-to-top
--- gradient (denser near the baseline, fading further out) and the stroke is
--- a lightened version of the same base color -- same look as the
--- conky-system reference widget's draw_area_graph(). Right-aligned so it
--- fills to the right edge even before `samples` history has accumulated.
--- `gcfg` is one of the CFG.graphs.* tables; `color_override` (optional)
--- replaces gcfg.color for dynamic-color graphs like CPU load.
 local function draw_area_graph(cr, x, y, w, gcfg, history, max_val, color_override)
     local n = #history
     if n < 2 or max_val <= 0 then return end
@@ -512,7 +521,7 @@ local function draw_area_graph(cr, x, y, w, gcfg, history, max_val, color_overri
     local samples = gcfg.samples or DEFAULT_HISTORY_LEN
     local h = gcfg.height
     local step = w / (samples - 1)
-    local offset = (samples - n) * step -- right-align a partial history
+    local offset = (samples - n) * step
     local color = color_override or gcfg.color
 
     cairo_save(cr)
@@ -550,7 +559,8 @@ end
 local function draw_time_panel(cr, x, y, w, h)
     local time_str = conky_parse("${time %H:%M}")
     local date_str = conky_parse("${time %a %d %b}")
-    local host_str = conky_parse("${nodename} | Arch Linux")
+    local os_name  = get_os_name()
+    local host_str = conky_parse("${nodename}") .. " | " .. os_name
     local uptime_str = conky_parse("${uptime_short}")
 
     draw_text(cr, x, y + 36, time_str, 32, CFG.colors.accent1, 1, true)
@@ -634,14 +644,12 @@ local function draw_storage_panel(cr, x, y, w, h)
 end
 
 local function draw_network_panel(cr, x, y, w, h)
-    local iface = CFG.network_iface
+    local iface = get_network_interface()
     local up = conky_parse("${upspeed " .. iface .. "}")
     local down = conky_parse("${downspeed " .. iface .. "}")
     local totalup = conky_parse("${totalup " .. iface .. "}")
     local totaldown = conky_parse("${totaldown " .. iface .. "}")
 
-    -- Numeric KiB/s (unlike upspeed/downspeed above, which are pre-formatted
-    -- with a unit suffix and not usable directly for graphing).
     local down_kib = num(conky_parse("${downspeedf " .. iface .. "}"))
     local up_kib = num(conky_parse("${upspeedf " .. iface .. "}"))
 
@@ -653,17 +661,13 @@ local function draw_network_panel(cr, x, y, w, h)
     draw_text(cr, x, y + 12, "NETWORK", 11, CFG.colors.accent4, 1, true)
     draw_text(cr, x + w, y + 12, iface, 10, CFG.colors.text, 0.85, false, "right")
 
-    draw_text(cr, x, y + 30, "▼ " .. down, 11, CFG.colors.accent4, 1, true)
-    draw_text(cr, x + w, y + 30, "▲ " .. up, 11, CFG.colors.accent1, 1, true, "right")
+    draw_text(cr, x, y + 30, "v " .. down, 11, CFG.colors.accent4, 1, true)
+    draw_text(cr, x + w, y + 30, "^ " .. up, 11, CFG.colors.accent1, 1, true, "right")
 
-    -- Down and up graphs side by side, each on its own configured MB/s ceiling.
     local graph_gap = 8
     local half_w = (w - graph_gap) / 2
     local graph_y = y + 54
-    -- Auto-zooms to recent traffic (so light use stays readable/visible)
-    -- while never scaling past the configured MB/s ceiling -- fixes graphs
-    -- looking flat/invisible when actual traffic is far below the ceiling.
-    local down_ceiling_kib = CFG.net_max_download * 1024 -- MB/s -> KiB/s
+    local down_ceiling_kib = CFG.net_max_download * 1024
     local up_ceiling_kib = CFG.net_max_upload * 1024
     local down_max = math.min(down_ceiling_kib, math.max(history_peak(down_hist) * 1.3, 64))
     local up_max = math.min(up_ceiling_kib, math.max(history_peak(up_hist) * 1.3, 64))
